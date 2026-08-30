@@ -1,0 +1,5 @@
+# Root-level env file used by `docker compose` for variable substitution
+# (Postgres credentials, etc). Never commit real secrets.
+.env
+.env.local
+.env.*.local

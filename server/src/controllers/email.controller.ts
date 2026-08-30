@@ -10,34 +10,46 @@ import { indexEmail, searchEmails } from '../services/elasticsearch.service.js';
 // as "now". Omitting startTime entirely continues to mean "send now" and is unaffected.
 const START_TIME_PAST_GRACE_MS = 60 * 1000;
 
-const scheduleSchema = z.object({
-  recipients: z.array(z.string().email('Invalid email address')).min(1, 'At least one recipient is required'),
-  subject: z.string().min(1, 'Subject is required'),
-  body: z.string().min(1, 'Body is required'),
-  startTime: z
-    .string()
-    .optional() // omitted => "send now", always valid
-    .refine(
-      (val) => {
-        if (val === undefined) return true;
-        const parsed = new Date(val);
-        if (Number.isNaN(parsed.getTime())) return false;
-        return parsed.getTime() >= Date.now() - START_TIME_PAST_GRACE_MS;
-      },
-      {
-        message:
-          'startTime must be a valid ISO date and must not be in the past (a ~60 second grace window is allowed). Omit startTime entirely to send immediately.',
-      }
-    ),
-  delayBetweenEmails: z.number().min(0).default(2), // in seconds
-  hourlyLimit: z.number().min(1).default(200),
-  senderId: z.string().optional(),
-  userId: z.string().optional(),
-});
+// Configurable defaults (used when the client omits delayBetweenEmails/hourlyLimit).
+// Read fresh from process.env inside the schema factory rather than module-level
+// constants so tests/scripts that mutate process.env before import still take effect.
+function getDefaultDelaySeconds(): number {
+  return parseInt(process.env.DEFAULT_MIN_DELAY_SECONDS || '2', 10);
+}
+function getDefaultHourlyLimit(): number {
+  return parseInt(process.env.DEFAULT_MAX_HOURLY_LIMIT || '200', 10);
+}
+
+function buildScheduleSchema() {
+  return z.object({
+    recipients: z.array(z.string().email('Invalid email address')).min(1, 'At least one recipient is required'),
+    subject: z.string().min(1, 'Subject is required'),
+    body: z.string().min(1, 'Body is required'),
+    startTime: z
+      .string()
+      .optional() // omitted => "send now", always valid
+      .refine(
+        (val) => {
+          if (val === undefined) return true;
+          const parsed = new Date(val);
+          if (Number.isNaN(parsed.getTime())) return false;
+          return parsed.getTime() >= Date.now() - START_TIME_PAST_GRACE_MS;
+        },
+        {
+          message:
+            'startTime must be a valid ISO date and must not be in the past (a ~60 second grace window is allowed). Omit startTime entirely to send immediately.',
+        }
+      ),
+    delayBetweenEmails: z.number().min(0).default(getDefaultDelaySeconds()), // in seconds
+    hourlyLimit: z.number().min(1).default(getDefaultHourlyLimit()),
+    senderId: z.string().optional(),
+    userId: z.string().optional(),
+  });
+}
 
 export async function scheduleEmails(req: Request, res: Response): Promise<void> {
   try {
-    const parseResult = scheduleSchema.safeParse(req.body);
+    const parseResult = buildScheduleSchema().safeParse(req.body);
     if (!parseResult.success) {
       res.status(400).json({ error: 'Validation failed', details: parseResult.error.flatten() });
       return;
@@ -276,8 +288,21 @@ export async function getEmailById(req: Request, res: Response): Promise<void> {
 export async function getSenders(req: Request, res: Response): Promise<void> {
   try {
     await getOrCreateDefaultSender();
+    // Explicit select: never return SMTP `user`/`pass` credentials to the client.
     const senders = await prisma.senderAccount.findMany({
       orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        host: true,
+        port: true,
+        hourlyLimit: true,
+        delaySeconds: true,
+        isDefault: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
     res.json({ success: true, senders });
   } catch (error: any) {

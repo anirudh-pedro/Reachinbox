@@ -1,7 +1,16 @@
 import axios from 'axios';
 import type { EmailJob, SenderAccount, Stats, SlackStatus } from '../types';
 
-const API_BASE = '/api';
+// In local dev, VITE_API_URL is left unset and requests go to the relative "/api"
+// path, which Vite's dev server proxies to the backend (see vite.config.ts) - this
+// preserves the existing local workflow exactly. In production (e.g. Vercel), set
+// VITE_API_URL to the deployed backend's origin (e.g. https://api.example.com) so
+// requests go directly to it instead of relying on a dev-only proxy that doesn't
+// exist in production.
+const API_ORIGIN = import.meta.env.VITE_API_URL?.replace(/\/+$/, '') || '';
+const API_BASE = `${API_ORIGIN}/api`;
+
+export { API_ORIGIN };
 
 export const api = {
   // Emails

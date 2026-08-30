@@ -1,0 +1,84 @@
+# Production override for docker-compose.yml. Does NOT replace it - merge both:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What this file does on top of the base compose file:
+#   - Adds the "api" and "worker" services (built from server/Dockerfile)
+#   - Removes host port publishing for postgres/redis/elasticsearch, so they are
+#     ONLY reachable from other containers on the Docker network (by service name),
+#     never from outside the Docker host at all. This is defense-in-depth on top of
+#     the EC2 security group already blocking 5432/6379/9200 publicly.
+#   - api/worker wait for postgres+redis to report healthy before starting (does
+#     NOT wait on elasticsearch - it's optional and falls back to Postgres search,
+#     so a slow/down ES must never block API/worker startup).
+#
+# Required environment: server/.env (see server/.env.example), referenced via
+# env_file below. Never commit server/.env.
+
+services:
+  # `!reset []` is required (not just `ports: []`) because Compose merges sequence
+  # attributes like `ports` across files by APPENDING, not replacing - a plain
+  # empty list here would be a no-op and the base file's published ports would
+  # still apply. !reset explicitly clears the value inherited from docker-compose.yml.
+  # (Requires Docker Compose v2.24.4+; verified against the installed version below.)
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  elasticsearch:
+    ports: !reset []
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: reachinbox_api
+    restart: unless-stopped
+    env_file:
+      - ./server/.env
+    environment:
+      # Overrides whatever DATABASE_URL/REDIS_* is in server/.env so the app talks
+      # to the other containers by their Docker service name (postgres/redis), not
+      # localhost/a host port. Password/user/db name come from the same root .env
+      # that the postgres service itself reads - never hardcoded here.
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword}@postgres:5432/${POSTGRES_DB:-reachinbox_db}?schema=public
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ELASTICSEARCH_NODE=http://elasticsearch:9200
+      - RUN_WORKER_IN_PROCESS=false
+      - HOST=0.0.0.0
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: reachinbox_worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - ./server/.env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword}@postgres:5432/${POSTGRES_DB:-reachinbox_db}?schema=public
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ELASTICSEARCH_NODE=http://elasticsearch:9200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

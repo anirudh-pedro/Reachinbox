@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, MessageSquare, CheckCircle2, Send, AlertCircle, Link2, Unlink } from 'lucide-react';
 import type { SlackStatus } from '../types';
-import { api } from '../services/api';
+import { api, API_ORIGIN } from '../services/api';
 
 interface SlackModalProps {
   isOpen: boolean;
@@ -25,7 +25,10 @@ export const SlackModal: React.FC<SlackModalProps> = ({
   if (!isOpen) return null;
 
   const handleOAuthConnect = () => {
-    window.location.href = 'http://localhost:5000/api/auth/slack/url?redirect=true';
+    // In dev, API_ORIGIN is empty and this correctly resolves relative to the
+    // current page (proxied by Vite). In production, VITE_API_URL points this at
+    // the real deployed backend instead of a meaningless "localhost:5000".
+    window.location.href = `${API_ORIGIN}/api/auth/slack/url?redirect=true`;
   };
 
   const handleWebhookConnect = async (e: React.FormEvent) => {

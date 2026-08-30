@@ -49,8 +49,8 @@ export async function getOrCreateDefaultSender(): Promise<{ transporter: Transpo
         secure: false,
         user: testUser,
         pass: testPass,
-        hourlyLimit: 200,
-        delaySeconds: 2,
+        hourlyLimit: parseInt(process.env.DEFAULT_MAX_HOURLY_LIMIT || '200', 10),
+        delaySeconds: parseInt(process.env.DEFAULT_MIN_DELAY_SECONDS || '2', 10),
         isDefault: true,
       },
     });

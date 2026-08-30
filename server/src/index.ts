@@ -4,8 +4,7 @@ import dotenv from 'dotenv';
 import emailRoutes from './routes/email.routes.js';
 import slackRoutes from './routes/slack.routes.js';
 import { serverAdapter } from './queue/bull-board.js';
-import './queue/email.worker.js'; // Start worker process
-import './services/slack.service.js'; // Start Slack event listener
+import './services/slack.service.js'; // Start Slack event listener (also needed here for the direct testSlackNotification endpoint)
 import { getOrCreateDefaultSender } from './services/mail.service.js';
 import { initElasticsearch } from './services/elasticsearch.service.js';
 import { prisma } from './config/prisma.js';
@@ -15,10 +14,33 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST || '0.0.0.0';
+
+// Whether this process should also run the BullMQ worker in-process.
+// Defaults to true so local `npm run dev` behavior is completely unchanged.
+// Set to "false" in production when the worker runs as its own container/process
+// (see server/src/worker.ts and docker-compose.prod.yml).
+const RUN_WORKER_IN_PROCESS = process.env.RUN_WORKER_IN_PROCESS !== 'false';
+let emailWorkerRef: import('bullmq').Worker | null = null;
+
+// CORS: supports one or more allowed origins (comma-separated), e.g. for a Vercel
+// frontend URL in production. Falls back to FRONTEND_URL (single origin, existing
+// behavior) and then to the local dev default, so no existing deployment breaks.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin(origin, callback) {
+    // Allow requests with no Origin header (curl, server-to-server, health checks).
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
   credentials: true,
 }));
 app.use(express.json());
@@ -90,12 +112,14 @@ app.get('/', (req, res) => {
 });
 
 // Start Server
-app.listen(PORT, async () => {
+const server = app.listen(Number(PORT), HOST, async () => {
   console.log(`\n======================================================`);
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📊 Bull-Board Queue Dashboard: http://localhost:${PORT}/admin/queues`);
-  console.log(`📧 API Base: http://localhost:${PORT}/api/emails`);
-  console.log(`🔔 Slack API: http://localhost:${PORT}/api/auth/slack`);
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
+  console.log(`📊 Bull-Board Queue Dashboard: http://${HOST}:${PORT}/admin/queues`);
+  console.log(`📧 API Base: http://${HOST}:${PORT}/api/emails`);
+  console.log(`🔔 Slack API: http://${HOST}:${PORT}/api/auth/slack`);
+  console.log(`🌐 CORS allowed origins: ${allowedOrigins.join(', ')}`);
+  console.log(`👷 Worker running in this process: ${RUN_WORKER_IN_PROCESS}`);
   console.log(`======================================================\n`);
 
   try {
@@ -110,4 +134,58 @@ app.listen(PORT, async () => {
   } catch (err: any) {
     console.warn('⚠️ Elasticsearch init warning:', err.message);
   }
+
+  // Optionally start the BullMQ worker in this same process (local dev default).
+  // In production, the worker typically runs as its own container with
+  // RUN_WORKER_IN_PROCESS=false here and server/src/worker.ts as its entrypoint.
+  if (RUN_WORKER_IN_PROCESS) {
+    try {
+      const workerModule = await import('./queue/email.worker.js');
+      emailWorkerRef = workerModule.emailWorker;
+    } catch (err: any) {
+      console.error('❌ Failed to start in-process worker:', err.message);
+    }
+  }
 });
+
+// Graceful shutdown: stop accepting new HTTP connections, let in-flight requests
+// finish, close the BullMQ worker (if running here) so it stops picking up new jobs
+// and finishes any job it's mid-processing, then close DB/Redis connections.
+let isShuttingDown = false;
+async function gracefulShutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+
+  server.close(() => {
+    console.log('✅ HTTP server closed (no longer accepting new connections).');
+  });
+
+  try {
+    if (emailWorkerRef) {
+      await emailWorkerRef.close();
+      console.log('✅ BullMQ worker closed.');
+    }
+  } catch (err: any) {
+    console.error('⚠️ Error closing worker:', err.message);
+  }
+
+  try {
+    await redisConnection.quit();
+    console.log('✅ Redis connection closed.');
+  } catch (err: any) {
+    console.error('⚠️ Error closing Redis connection:', err.message);
+  }
+
+  try {
+    await prisma.$disconnect();
+    console.log('✅ Prisma disconnected.');
+  } catch (err: any) {
+    console.error('⚠️ Error disconnecting Prisma:', err.message);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
