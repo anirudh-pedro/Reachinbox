@@ -22,6 +22,7 @@ import {
   AlignJustify,
   Strikethrough,
   AlertCircle,
+  CheckCircle2,
   ChevronDown,
   Menu,
 } from 'lucide-react';
@@ -81,6 +82,12 @@ export const ComposeView: React.FC<ComposeViewProps> = ({ senders, onClose, onSc
   const [scheduledIso, setScheduledIso] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [csvFeedback, setCsvFeedback] = useState<{
+    filename: string;
+    validCount: number;
+    duplicatesRemoved: number;
+    invalidCount: number;
+  } | null>(null);
 
   const csvInputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -120,8 +127,60 @@ export const ComposeView: React.FC<ComposeViewProps> = ({ senders, onClose, onSc
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
-      const content = event.target?.result as string;
-      addRecipients(content);
+      const content = (event.target?.result as string) || '';
+      const rawTokens = content
+        .split(/[\r\n,;]+/)
+        .map((t) => t.trim().replace(/^["']|["']$/g, ''))
+        .filter(Boolean);
+
+      const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+      const validEmails: string[] = [];
+      let duplicatesCount = 0;
+      let invalidCount = 0;
+
+      const seen = new Set<string>(recipients.map((r) => r.toLowerCase()));
+
+      for (const token of rawTokens) {
+        if (/^(email|emails|email\s*address|recipient|name)$/i.test(token)) {
+          continue;
+        }
+
+        if (emailRegex.test(token)) {
+          const lower = token.toLowerCase();
+          if (seen.has(lower)) {
+            duplicatesCount++;
+          } else {
+            seen.add(lower);
+            validEmails.push(token);
+          }
+        } else {
+          const embeddedMatches = token.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (embeddedMatches && embeddedMatches.length > 0) {
+            for (const em of embeddedMatches) {
+              const lower = em.toLowerCase();
+              if (seen.has(lower)) {
+                duplicatesCount++;
+              } else {
+                seen.add(lower);
+                validEmails.push(em);
+              }
+            }
+          } else {
+            invalidCount++;
+          }
+        }
+      }
+
+      if (validEmails.length > 0) {
+        setRecipients((prev) => [...prev, ...validEmails]);
+      }
+
+      setCsvFeedback({
+        filename: file.name,
+        validCount: validEmails.length,
+        duplicatesRemoved: duplicatesCount,
+        invalidCount,
+      });
     };
     reader.readAsText(file);
     e.target.value = '';
@@ -266,6 +325,27 @@ export const ComposeView: React.FC<ComposeViewProps> = ({ senders, onClose, onSc
           <div className="mb-4 p-3 bg-red-50 border border-red-100 rounded-lg flex items-center gap-2 text-xs text-red-500">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {csvFeedback && (
+          <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-between gap-2 text-xs text-emerald-800 animate-fade-in">
+            <div className="flex items-center gap-2 min-w-0">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="truncate">
+                <strong>{csvFeedback.filename}</strong>: {csvFeedback.validCount} valid email{csvFeedback.validCount !== 1 ? 's' : ''} detected
+                {csvFeedback.duplicatesRemoved > 0 && ` (${csvFeedback.duplicatesRemoved} duplicate${csvFeedback.duplicatesRemoved !== 1 ? 's' : ''} removed)`}
+                {csvFeedback.invalidCount > 0 && ` (${csvFeedback.invalidCount} invalid skipped)`}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCsvFeedback(null)}
+              className="text-emerald-500 hover:text-emerald-800 p-0.5 cursor-pointer shrink-0"
+              title="Dismiss"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 

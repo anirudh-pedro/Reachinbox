@@ -14,12 +14,12 @@ interface SendMailResult {
   senderEmail: string;
 }
 
-let defaultTransporter: Transporter | null = null;
-let defaultSenderEmail = '';
+const transporterCache = new Map<string, { transporter: Transporter; senderEmail: string; senderName: string }>();
 
-export async function getOrCreateDefaultSender(): Promise<{ transporter: Transporter; senderEmail: string }> {
-  if (defaultTransporter) {
-    return { transporter: defaultTransporter, senderEmail: defaultSenderEmail };
+export async function getOrCreateDefaultSender(): Promise<{ transporter: Transporter; senderEmail: string; senderName: string }> {
+  const cached = transporterCache.get('default');
+  if (cached) {
+    return cached;
   }
 
   // Check if default sender exists in DB
@@ -58,8 +58,7 @@ export async function getOrCreateDefaultSender(): Promise<{ transporter: Transpo
     console.log(`✅ Created default Ethereal sender: ${sender.email}`);
   }
 
-  defaultSenderEmail = sender.email;
-  defaultTransporter = nodemailer.createTransport({
+  const transporter = nodemailer.createTransport({
     host: sender.host,
     port: sender.port,
     secure: sender.secure,
@@ -72,13 +71,26 @@ export async function getOrCreateDefaultSender(): Promise<{ transporter: Transpo
     socketTimeout: 8000,
   });
 
-  return { transporter: defaultTransporter, senderEmail: defaultSenderEmail };
+  const entry = {
+    transporter,
+    senderEmail: sender.email,
+    senderName: sender.name,
+  };
+
+  transporterCache.set('default', entry);
+  transporterCache.set(sender.id, entry);
+
+  return entry;
 }
 
 export async function getTransporterForSender(senderId?: string): Promise<{ transporter: Transporter; senderEmail: string; senderName: string }> {
   if (!senderId) {
-    const { transporter, senderEmail } = await getOrCreateDefaultSender();
-    return { transporter, senderEmail, senderName: 'ReachInbox Mailer' };
+    return getOrCreateDefaultSender();
+  }
+
+  const cached = transporterCache.get(senderId);
+  if (cached) {
+    return cached;
   }
 
   const sender = await prisma.senderAccount.findUnique({
@@ -86,8 +98,7 @@ export async function getTransporterForSender(senderId?: string): Promise<{ tran
   });
 
   if (!sender) {
-    const { transporter, senderEmail } = await getOrCreateDefaultSender();
-    return { transporter, senderEmail, senderName: 'ReachInbox Mailer' };
+    return getOrCreateDefaultSender();
   }
 
   const transporter = nodemailer.createTransport({
@@ -103,11 +114,14 @@ export async function getTransporterForSender(senderId?: string): Promise<{ tran
     socketTimeout: 8000,
   });
 
-  return {
+  const entry = {
     transporter,
     senderEmail: sender.email,
     senderName: sender.name,
   };
+
+  transporterCache.set(sender.id, entry);
+  return entry;
 }
 
 export async function sendEmail({ to, subject, body, senderId }: SendMailParams): Promise<SendMailResult> {
@@ -132,9 +146,6 @@ export async function sendEmail({ to, subject, body, senderId }: SendMailParams)
       senderEmail,
     };
   } catch (err: any) {
-    // Real SMTP failure (auth error, connection reset, timeout, etc). Do not fabricate a
-    // fake success here - propagate the error so the worker can record a genuine FAILED
-    // state and let BullMQ's retry policy decide whether to try again.
     console.error(`❌ SMTP send failed for ${to}:`, err.message);
     throw err;
   }

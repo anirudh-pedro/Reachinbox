@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { EmailListView } from './components/EmailListView';
 import { EmailDetailView } from './components/EmailDetailView';
@@ -36,7 +36,9 @@ export function App() {
   const [scheduledPagination, setScheduledPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
   const [sentPagination, setSentPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
 
-  // Fetch initial data
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Fetch initial dashboard metadata
   const fetchData = useCallback(async () => {
     try {
       const [statsData, sendersData, slackData] = await Promise.all([
@@ -56,9 +58,17 @@ export function App() {
   const fetchScheduled = useCallback(async (page = 1, search = scheduledSearch) => {
     setLoading(true);
     try {
-      const res = await api.getScheduledEmails({ page, limit: 20, search });
-      setScheduledEmails(res.data);
-      setScheduledPagination(res.pagination);
+      const trimmedQuery = search.trim();
+      if (trimmedQuery) {
+        // Use Elasticsearch search API
+        const res = await api.searchEmails({ q: trimmedQuery, tab: 'scheduled', page, limit: 20 });
+        setScheduledEmails(res.data);
+        setScheduledPagination(res.pagination);
+      } else {
+        const res = await api.getScheduledEmails({ page, limit: 20 });
+        setScheduledEmails(res.data);
+        setScheduledPagination(res.pagination);
+      }
     } catch (err) {
       console.error('Failed to fetch scheduled emails:', err);
     } finally {
@@ -69,9 +79,17 @@ export function App() {
   const fetchSent = useCallback(async (page = 1, search = sentSearch) => {
     setLoading(true);
     try {
-      const res = await api.getSentEmails({ page, limit: 20, search });
-      setSentEmails(res.data);
-      setSentPagination(res.pagination);
+      const trimmedQuery = search.trim();
+      if (trimmedQuery) {
+        // Use Elasticsearch search API
+        const res = await api.searchEmails({ q: trimmedQuery, tab: 'sent', page, limit: 20 });
+        setSentEmails(res.data);
+        setSentPagination(res.pagination);
+      } else {
+        const res = await api.getSentEmails({ page, limit: 20 });
+        setSentEmails(res.data);
+        setSentPagination(res.pagination);
+      }
     } catch (err) {
       console.error('Failed to fetch sent emails:', err);
     } finally {
@@ -85,19 +103,38 @@ export function App() {
     fetchScheduled(1);
     fetchSent(1);
 
-    // Auto-refresh stats every 4 seconds
+    // Auto-refresh stats every 4 seconds, but do NOT clobber active searches
     const interval = setInterval(() => {
       fetchData();
       if (activeTab === 'scheduled') {
-        fetchScheduled(scheduledPagination.page);
+        if (!scheduledSearch.trim()) {
+          fetchScheduled(scheduledPagination.page);
+        }
       } else {
-        fetchSent(sentPagination.page);
+        if (!sentSearch.trim()) {
+          fetchSent(sentPagination.page);
+        }
       }
     }, 4000);
 
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, activeTab]);
+  }, [user, activeTab, scheduledSearch, sentSearch, scheduledPagination.page, sentPagination.page, fetchData, fetchScheduled, fetchSent]);
+
+  const handleSearchChange = (q: string) => {
+    if (activeTab === 'scheduled') {
+      setScheduledSearch(q);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = setTimeout(() => {
+        fetchScheduled(1, q);
+      }, 300);
+    } else {
+      setSentSearch(q);
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = setTimeout(() => {
+        fetchSent(1, q);
+      }, 300);
+    }
+  };
 
   const handleLogin = (newUser: User) => {
     setUser(newUser);
@@ -127,7 +164,7 @@ export function App() {
 
   const handleScheduledSuccess = () => {
     fetchData();
-    fetchScheduled();
+    fetchScheduled(1, '');
     setActiveTab('scheduled');
     setView('list');
   };
@@ -178,22 +215,14 @@ export function App() {
           emails={currentEmails}
           loading={loading}
           searchQuery={currentSearch}
-          onSearchChange={(q) => {
-            if (activeTab === 'scheduled') {
-              setScheduledSearch(q);
-              fetchScheduled(1, q);
-            } else {
-              setSentSearch(q);
-              fetchSent(1, q);
-            }
-          }}
+          onSearchChange={handleSearchChange}
           onRefresh={() => {
             fetchData();
-            if (activeTab === 'scheduled') fetchScheduled();
-            else fetchSent();
+            if (activeTab === 'scheduled') fetchScheduled(1, scheduledSearch);
+            else fetchSent(1, sentSearch);
           }}
           pagination={currentPagination}
-          onPageChange={(p) => (activeTab === 'scheduled' ? fetchScheduled(p) : fetchSent(p))}
+          onPageChange={(p) => (activeTab === 'scheduled' ? fetchScheduled(p, scheduledSearch) : fetchSent(p, sentSearch))}
           onSelectEmail={handleSelectEmail}
           onOpenMobileNav={() => setMobileNavOpen(true)}
         />

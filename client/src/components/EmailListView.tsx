@@ -137,15 +137,22 @@ export const EmailListView: React.FC<EmailListViewProps> = ({
                       </span>
                     )
                   ) : (
-                    <span
-                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium whitespace-nowrap shrink-0 ${
-                        job.status === 'SENT'
-                          ? 'bg-gray-100 text-gray-500'
-                          : 'bg-red-50 text-red-500'
-                      }`}
-                    >
-                      {job.status === 'SENT' ? 'Sent' : 'Failed'}
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[11px] font-medium whitespace-nowrap ${
+                          job.status === 'SENT'
+                            ? 'bg-gray-100 text-gray-500'
+                            : 'bg-red-50 text-red-500'
+                        }`}
+                      >
+                        {job.status === 'SENT' ? 'Sent' : 'Failed'}
+                      </span>
+                      {job.sentAt && (
+                        <span className="text-[11px] text-gray-400 whitespace-nowrap">
+                          {formatTime(job.sentAt)}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
 

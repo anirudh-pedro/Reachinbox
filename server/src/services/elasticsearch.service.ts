@@ -68,7 +68,11 @@ export interface EmailDoc {
   createdAt: Date | string;
 }
 
-export async function indexEmail(email: EmailDoc): Promise<void> {
+/**
+ * Indexes an email document in Elasticsearch with retry and non-blocking safety.
+ * PostgreSQL is always preserved as the canonical source of truth.
+ */
+export async function indexEmail(email: EmailDoc, retryCount = 0): Promise<void> {
   if (!isElasticsearchAvailable) return;
 
   try {
@@ -89,13 +93,21 @@ export async function indexEmail(email: EmailDoc): Promise<void> {
       },
     });
   } catch (err: any) {
-    console.warn(`⚠️ Failed to index email ${email.id} in Elasticsearch:`, err.message);
+    if (retryCount < 2) {
+      // Retry once after a brief delay
+      setTimeout(() => {
+        indexEmail(email, retryCount + 1).catch(() => {});
+      }, 500 * (retryCount + 1));
+    } else {
+      console.warn(`⚠️ Failed to index email ${email.id} in Elasticsearch:`, err.message);
+    }
   }
 }
 
 export interface SearchParams {
   query?: string;
   status?: string;
+  tab?: 'scheduled' | 'sent';
   page?: number;
   limit?: number;
 }
@@ -104,8 +116,20 @@ export async function searchEmails(params: SearchParams) {
   const page = params.page || 1;
   const limit = params.limit || 20;
   const query = params.query?.trim() || '';
-  const status = params.status?.trim();
   const from = (page - 1) * limit;
+
+  // Resolve target statuses
+  let targetStatuses: string[] = [];
+  if (params.tab === 'scheduled') {
+    targetStatuses = ['SCHEDULED', 'PROCESSING', 'RATE_LIMITED'];
+  } else if (params.tab === 'sent') {
+    targetStatuses = ['SENT', 'FAILED'];
+  } else if (params.status && params.status !== 'ALL') {
+    targetStatuses = params.status
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+  }
 
   // 1. Try Elasticsearch first
   if (isElasticsearchAvailable) {
@@ -124,9 +148,13 @@ export async function searchEmails(params: SearchParams) {
         mustClauses.push({ match_all: {} });
       }
 
-      if (status && status !== 'ALL') {
+      if (targetStatuses.length === 1) {
         mustClauses.push({
-          term: { status: status.toUpperCase() },
+          term: { status: targetStatuses[0] },
+        });
+      } else if (targetStatuses.length > 1) {
+        mustClauses.push({
+          terms: { status: targetStatuses },
         });
       }
 
@@ -164,9 +192,12 @@ export async function searchEmails(params: SearchParams) {
 
   // 2. Fallback to PostgreSQL
   const where: any = {};
-  if (status && status !== 'ALL') {
-    where.status = status.toUpperCase();
+  if (targetStatuses.length === 1) {
+    where.status = targetStatuses[0];
+  } else if (targetStatuses.length > 1) {
+    where.status = { in: targetStatuses };
   }
+
   if (query) {
     where.OR = [
       { recipient: { contains: query, mode: 'insensitive' } },

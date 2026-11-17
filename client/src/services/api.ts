@@ -43,7 +43,7 @@ export const api = {
     return res.data;
   },
 
-  async searchEmails(params: { q: string; status?: string; page?: number; limit?: number }) {
+  async searchEmails(params: { q: string; status?: string; tab?: 'scheduled' | 'sent'; page?: number; limit?: number }) {
     const res = await axios.get<{ success: boolean; source: string; data: EmailJob[]; pagination: any }>(
       `${API_BASE}/emails/search`,
       { params }

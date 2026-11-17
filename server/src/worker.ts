@@ -19,6 +19,7 @@
  *    calling it here too, this worker's indexEmail() calls would silently no-op
  *    even if Elasticsearch is healthy.
  */
+import './config/env.js';
 import dotenv from 'dotenv';
 dotenv.config();
 

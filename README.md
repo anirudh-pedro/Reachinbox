@@ -119,6 +119,24 @@ default `SenderAccount`. You don't need to sign up for anything — just start t
 first scheduled email will have a real, clickable Ethereal preview URL in the API response and in
 the dashboard's email detail view.
 
+### 6. Multi-Sender Seeding (Optional)
+
+To test multi-sender workflows with custom rate limits (e.g. 5/hr, 50/hr, 200/hr):
+
+```powershell
+cd server
+npm run seed:senders
+```
+
+### 7. Automated Test Suite
+
+Run the unit and integration test suite:
+
+```powershell
+cd server
+npm test
+```
+
 ## Running the App
 
 Two separate processes, both required:
@@ -244,35 +262,22 @@ implementation claims to solve, and it's called out explicitly rather than gloss
 - **Minimum delay between sends per sender** is enforced two ways:
   1. At scheduling time, the API stages each recipient's `scheduledAt` `delayBetweenEmails`
      seconds apart from the previous one in the same batch.
-  2. At send time, `enforcePerSenderDelay()` uses a Redis key (`throttle:last_send:<senderId>`)
-     to track the last send timestamp for that sender and blocks the current job until the
-     minimum interval has elapsed — this is safe across multiple concurrent workers because the
-     check reads/writes through Redis, not in-memory state.
+  2. At send time, `checkSenderDelayThrottle()` uses an **atomic Redis Lua script** (`throttle:next_send:<senderId>`)
+     to calculate and reserve the sender's next permitted send slot. Under concurrency, if a job is throttled
+     by more than 150ms, it is **rescheduled via BullMQ delayed jobs** rather than holding and blocking worker
+     threads, ensuring high throughput across multiple senders.
 
-Verified: two emails scheduled 3 seconds apart from the same sender had `sentAt` timestamps ~2.8s
-apart in practice (within normal processing overhead).
-
-## Redis-Backed Hourly Rate Limiting
+## Redis-Backed Hourly Rate Limiting & Reliable Rescheduling
 
 Enforced with an atomic Lua script (`checkAndIncrementHourlyLimit`) executed via
-`redis.eval()`, keyed by `ratelimit:emails:<senderId>:<YYYYMMDDHH>`. The check-and-increment
-happens as a single atomic Redis operation, so it's safe under concurrent workers or multiple
-backend instances — there's no read-then-write race window.
+`redis.eval()`, keyed by `ratelimit:emails:<senderId>:<YYYYMMDDHH>` and `ratelimit:alert:<senderId>:<YYYYMMDDHH>`.
 
-When the limit is reached:
-- The job is **not dropped and not marked FAILED**. Its status becomes `RATE_LIMITED` and its
-  `scheduledAt` is updated to the start of the next hour window; a new BullMQ delayed job is
-  enqueued for that time.
-- A `RATE_LIMIT_TRIPPED` event fires, which the Slack listener picks up (see below).
-
-Verified directly: with a temporary `hourlyLimit: 2` and 3 recipients queued, the third job logged
-`Rate limit REACHED for sender default (2/2 this hour)`, was rescheduled to the next hour boundary
-with `status: RATE_LIMITED`, while the first two sent normally.
-
-**Trade-off:** the limit is enforced per `senderId` (falling back to `'default'` for the shared
-Ethereal test sender), not globally across all senders — this matches the assignment's
-"per-sender" option and supports the multi-sender schema already in place
-(`SenderAccount.hourlyLimit`), but means a global cross-sender cap isn't separately enforced.
+Key features:
+- **Zero Overshoot**: The check-and-increment happens as a single atomic operation; counters never exceed limits.
+- **Single Slack Alert per Window**: The script atomically tracks an alert key so only the **first** breach in an hour window triggers a Slack notification (preventing alert spam).
+- **Deterministic Versioned Rescheduling**: Rather than reusing the active BullMQ `jobId` (which BullMQ would drop due to active-job deduplication), rescheduled jobs receive a deterministic versioned ID (`<emailJobId>:rate_limit:<count>`).
+- **Order Preservation**: Rate-limited jobs are scheduled into the next hour window using an order-preserving Redis cursor offset (`getNextHourStaggeredTimestamp`).
+- **Distributed Locking & Idempotency**: Each email is protected by a Redis mutex (`lock:email:<emailJobId>`) and an atomic database state transition (`SCHEDULED`/`RATE_LIMITED` → `PROCESSING`). If an email is already `SENT` or superseded by a newer execution, it is skipped safely.
 
 ## Slack Setup
 

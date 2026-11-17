@@ -57,9 +57,17 @@ export async function scheduleEmails(req: Request, res: Response): Promise<void>
 
     const { recipients, subject, body, startTime, delayBetweenEmails, hourlyLimit, senderId, userId } = parseResult.data;
 
-    let defaultSenderInfo: any = null;
-    if (!senderId) {
-      defaultSenderInfo = await getOrCreateDefaultSender();
+    let effectiveSenderId = senderId;
+    let senderEmailAddress: string | undefined;
+
+    if (senderId) {
+      const sender = await prisma.senderAccount.findUnique({ where: { id: senderId } });
+      senderEmailAddress = sender?.email;
+    } else {
+      const defaultSenderInfo = await getOrCreateDefaultSender();
+      senderEmailAddress = defaultSenderInfo.senderEmail;
+      const defaultSender = await prisma.senderAccount.findFirst({ where: { isDefault: true } });
+      effectiveSenderId = defaultSender?.id;
     }
 
     const baseStartTime = startTime ? new Date(startTime) : new Date();
@@ -82,7 +90,7 @@ export async function scheduleEmails(req: Request, res: Response): Promise<void>
           batchId,
           delayBetweenEmails,
           hourlyLimit,
-          senderId: senderId || undefined,
+          senderId: effectiveSenderId || undefined,
           userId: userId || undefined,
         },
       });
@@ -94,22 +102,23 @@ export async function scheduleEmails(req: Request, res: Response): Promise<void>
         subject: emailRecord.subject,
         body: emailRecord.body,
         status: emailRecord.status,
-        senderEmail: defaultSenderInfo?.senderEmail,
+        senderEmail: senderEmailAddress,
         scheduledAt: emailRecord.scheduledAt,
         createdAt: emailRecord.createdAt,
       }).catch((e) => console.warn('ES indexing warning:', e.message));
 
-      // 3. Add to BullMQ with deterministic jobId = emailRecord.id
+      // 3. Add to BullMQ with deterministic initial jobId = emailRecord.id
       await addEmailToQueue(
         {
           emailJobId: emailRecord.id,
           recipient,
           subject,
           body,
-          senderId,
+          senderId: effectiveSenderId,
           userId,
           delayBetweenEmails,
           hourlyLimit,
+          rescheduleCount: 0,
         },
         targetTime
       );
@@ -227,10 +236,11 @@ export async function searchEmailsHandler(req: Request, res: Response): Promise<
   try {
     const q = req.query.q as string;
     const status = req.query.status as string;
+    const tab = req.query.tab as 'scheduled' | 'sent' | undefined;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
 
-    const results = await searchEmails({ query: q, status, page, limit });
+    const results = await searchEmails({ query: q, status, tab, page, limit });
     res.json({ success: true, ...results });
   } catch (error: any) {
     console.error('Error in search:', error);
